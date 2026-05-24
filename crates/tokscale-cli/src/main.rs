@@ -257,6 +257,13 @@ enum Commands {
         #[arg(long, help = "Disable loading spinner (for scripting)")]
         no_spinner: bool,
     },
+    #[command(about = "Show subscription usage and quota for AI providers")]
+    Usage {
+        #[arg(long, help = "Output as JSON")]
+        json: bool,
+        #[arg(long, help = "Light terminal output (no TUI)")]
+        light: bool,
+    },
     #[command(about = "Cursor IDE integration commands")]
     Cursor {
         #[command(subcommand)]
@@ -636,6 +643,10 @@ fn main() -> Result<()> {
         Some(Commands::Antigravity { subcommand }) => {
             reject_unsupported_home_override(&cli.home, "antigravity")?;
             run_antigravity_command(subcommand)
+        }
+        Some(Commands::Usage { json, light }) => {
+            reject_unsupported_home_override(&cli.home, "usage")?;
+            commands::usage::run(json, light)
         }
         Some(Commands::Trae { subcommand }) => {
             reject_unsupported_home_override(&cli.home, "trae")?;

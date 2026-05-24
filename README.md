@@ -110,6 +110,7 @@ In the age of AI-assisted development, **tokens are the new energy**. They power
   - [Cursor IDE Commands](#cursor-ide-commands)
   - [Antigravity Commands](#antigravity-commands)
   - [Trae Commands](#trae-commands)
+  - [Subscription Usage](#subscription-usage)
   - [Example Output](#example-output---light-version)
   - [Configuration](#configuration)
   - [Environment Variables](#environment-variables)
@@ -248,7 +249,7 @@ tokscale models --json > report.json   # Save to file
 
 The interactive TUI mode provides:
 
-- **6 Views**: Overview (chart + top models), Models, Daily, Hourly, Stats (contribution graph), Agents. A seventh per-minute view (Minutely) is hidden by default and can be enabled with `minutelyTabEnabled` in `settings.json` — see [Configuration](#configuration)
+- **8 Views**: Overview (chart + top models), Usage (subscription quotas), Models, Daily, Hourly, Stats (contribution graph), Agents. A per-minute view (Minutely) is hidden by default and can be enabled with `minutelyTabEnabled` in `settings.json` — see [Configuration](#configuration)
 - **Keyboard Navigation**:
   - `←/→/Tab/BackTab`: Switch views
   - `↑/↓` or `Home/End`: Navigate lists
@@ -599,6 +600,52 @@ tokscale trae logout --variant solo
 **How it works**: tokscale either decrypts the desktop client's `iCubeAuthInfo://*` blob (`globalStorage/storage.json`) to recover a JWT, or accepts one pasted via `--manual`. It then calls `POST /trae/api/v1/pay/query_user_usage_group_by_session` paginated and stores the raw JSON. Run sync before reports if you want the freshest Trae data.
 
 > **China variants**: The China editions (`trae.com.cn`) are intentionally **not** supported. The CN backend does not expose a session-level usage query API. Trae CN / Trae Solo CN support will be added once an official endpoint becomes available upstream.
+### Subscription Usage
+
+Tokscale can fetch and display your real-time subscription quota across AI providers. This shows how much of your plan you've used and when limits reset.
+
+```bash
+# Show subscription usage for all detected providers
+tokscale usage
+
+# Output as JSON (for scripting)
+tokscale usage --json
+
+# Lightweight terminal output (no TUI)
+tokscale usage --light
+```
+
+In the TUI, navigate to the **Usage** tab to see subscription data. Press `u` or `r` to refresh.
+
+#### Supported Providers
+
+| Provider | Auth Method | Metrics | Setup |
+|----------|-------------|---------|-------|
+| **Claude** | OAuth (credentials file or macOS Keychain) | Session (5hr), Weekly, Opus quotas | Run `claude` to log in |
+| **Codex** (OpenAI) | OAuth (`~/.config/codex/auth.json` or `~/.codex/auth.json`) | Session, Weekly quotas | Run `codex` to log in |
+| **Z.ai** | API key (env var) | Token limits, Web Searches | Set `ZAI_API_KEY` or `GLM_API_KEY` |
+| **Amp** | API key (`~/.local/share/amp/secrets.json`) | Free tier balance, Credits | Run `amp` to log in |
+| **GitHub Copilot** | GitHub token (keychain or `~/.config/gh/hosts.yml`) | Premium interactions, Chat quotas | Run `gh auth login` |
+| **Kimi** | OAuth (`~/.kimi/credentials/kimi-code.json`) | Session, Weekly quotas | Run `kimi` to log in |
+| **MiniMax** | API key (env var) | Prompt quotas per model | Set `MINIMAX_API_KEY` or `MINIMAX_API_TOKEN` |
+
+Providers are auto-detected — only those with valid credentials are shown. If a provider is missing, ensure you've logged in or set the required environment variable.
+
+#### Example Output
+
+```
+╭──────────────────────────────────────────────────────────╮
+│ Session    85% left  [=========---] resets in 2h 15m     │
+│ Weekly     72% left  [========----] resets Fri 3pm       │
+│ Plan     Max 20x                                         │
+╰──────────────────────────────────────────────────────────╯
+╭──────────────────────────────────────────────────────────╮
+│ Session    40% left  [=====-------] resets in 4h 30m     │
+│ Weekly     90% left  [==========--] resets Mon 12am      │
+│ Account  user@example.com                                │
+│ Plan     Pro                                             │
+╰──────────────────────────────────────────────────────────╯
+```
 
 ### Example Output (`--light` version)
 

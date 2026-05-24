@@ -37,6 +37,7 @@ pub struct TuiConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Tab {
     Overview,
+    Usage,
     Models,
     Daily,
     Hourly,
@@ -49,6 +50,7 @@ impl Tab {
     pub fn all() -> &'static [Tab] {
         &[
             Tab::Overview,
+            Tab::Usage,
             Tab::Models,
             Tab::Daily,
             Tab::Hourly,
@@ -61,6 +63,7 @@ impl Tab {
     pub fn as_str(&self) -> &'static str {
         match self {
             Tab::Overview => "Overview",
+            Tab::Usage => "Usage",
             Tab::Models => "Models",
             Tab::Daily => "Daily",
             Tab::Hourly => "Hourly",
@@ -73,6 +76,7 @@ impl Tab {
     pub fn short_name(&self) -> &'static str {
         match self {
             Tab::Overview => "Ovw",
+            Tab::Usage => "Use",
             Tab::Models => "Mod",
             Tab::Daily => "Day",
             Tab::Hourly => "Hr",
@@ -84,7 +88,8 @@ impl Tab {
 
     pub fn next(self) -> Tab {
         match self {
-            Tab::Overview => Tab::Models,
+            Tab::Overview => Tab::Usage,
+            Tab::Usage => Tab::Models,
             Tab::Models => Tab::Daily,
             Tab::Daily => Tab::Hourly,
             Tab::Hourly => Tab::Minutely,
@@ -97,7 +102,8 @@ impl Tab {
     pub fn prev(self) -> Tab {
         match self {
             Tab::Overview => Tab::Agents,
-            Tab::Models => Tab::Overview,
+            Tab::Usage => Tab::Overview,
+            Tab::Models => Tab::Usage,
             Tab::Daily => Tab::Models,
             Tab::Hourly => Tab::Daily,
             Tab::Minutely => Tab::Hourly,
@@ -221,6 +227,12 @@ pub struct App {
     pub hourly_view_mode: HourlyViewMode,
 
     pub model_shade_map: HashMap<String, Color>,
+
+    pub subscription_usage: Vec<crate::commands::usage::UsageOutput>,
+
+    pub usage_fetch_attempted: bool,
+    usage_rx: Option<std::sync::mpsc::Receiver<Vec<crate::commands::usage::UsageOutput>>>,
+
     data_version: u64,
     minutely_sort_cache: RefCell<Option<MinutelySortCache>>,
 }
@@ -322,6 +334,18 @@ impl App {
             dialog_needs_reload,
             hourly_view_mode: HourlyViewMode::default(),
             model_shade_map: HashMap::new(),
+            subscription_usage: {
+                #[cfg(not(test))]
+                {
+                    crate::commands::usage::load_cache().unwrap_or_default()
+                }
+                #[cfg(test)]
+                {
+                    Vec::new()
+                }
+            },
+            usage_fetch_attempted: false,
+            usage_rx: None,
             data_version: 0,
             minutely_sort_cache: RefCell::new(None),
         };
@@ -415,6 +439,30 @@ impl App {
             *self.dialog_needs_reload.borrow_mut() = false;
             self.needs_reload = true;
         }
+
+        // Poll background usage fetch
+        if let Some(ref rx) = self.usage_rx {
+            match rx.try_recv() {
+                Ok(results) => {
+                    self.usage_rx = None;
+                    self.subscription_usage = results;
+                    if !self.subscription_usage.is_empty() {
+                        crate::commands::usage::save_cache(&self.subscription_usage);
+                        self.status_message = Some("Usage data loaded".into());
+                    } else {
+                        crate::commands::usage::clear_cache();
+                        self.status_message = Some("No usage data available".into());
+                    }
+                    self.status_message_time = Some(std::time::Instant::now());
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.usage_rx = None;
+                    self.status_message = Some("Usage fetch failed".into());
+                    self.status_message_time = Some(std::time::Instant::now());
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+        }
     }
 
     pub fn handle_key_event(&mut self, key: KeyEvent) -> bool {
@@ -491,6 +539,7 @@ impl App {
                     self.set_status("Refresh already in progress");
                 } else {
                     self.needs_reload = true;
+                    self.fetch_subscription_usage();
                 }
             }
             KeyCode::Char('R') if key.modifiers.contains(KeyModifiers::SHIFT) => {
@@ -527,6 +576,9 @@ impl App {
             KeyCode::Char('g') => {
                 self.open_group_by_picker();
             }
+            KeyCode::Char('u') if self.current_tab == Tab::Usage => {
+                self.fetch_subscription_usage();
+            }
             KeyCode::Enter if self.current_tab == Tab::Daily => {
                 self.open_selected_daily_detail();
             }
@@ -547,6 +599,25 @@ impl App {
             _ => {}
         }
         false
+    }
+
+    pub fn fetch_subscription_usage(&mut self) {
+        if self.usage_rx.is_some() {
+            return; // already fetching
+        }
+        self.usage_fetch_attempted = true;
+        self.status_message = Some("Fetching usage data...".into());
+        self.status_message_time = Some(std::time::Instant::now());
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.usage_rx = Some(rx);
+        std::thread::spawn(move || {
+            let results = crate::commands::usage::fetch_all();
+            let _ = tx.send(results);
+        });
+    }
+
+    pub fn is_fetching_usage(&self) -> bool {
+        self.usage_rx.is_some()
     }
 
     pub fn handle_mouse_event(&mut self, event: MouseEvent) {
@@ -828,6 +899,11 @@ impl App {
                     0
                 }
             }
+            Tab::Usage => self
+                .subscription_usage
+                .iter()
+                .map(|u| u.metrics.len())
+                .sum(),
         }
     }
 
@@ -1089,7 +1165,7 @@ impl App {
                         m.cost
                     )
                 }),
-            Tab::Stats => None,
+            Tab::Stats | Tab::Usage => None,
         };
 
         if let Some(text) = text {
@@ -1433,19 +1509,21 @@ mod tests {
     #[test]
     fn test_tab_all() {
         let tabs = Tab::all();
-        assert_eq!(tabs.len(), 7);
+        assert_eq!(tabs.len(), 8);
         assert_eq!(tabs[0], Tab::Overview);
-        assert_eq!(tabs[1], Tab::Models);
-        assert_eq!(tabs[2], Tab::Daily);
-        assert_eq!(tabs[3], Tab::Hourly);
-        assert_eq!(tabs[4], Tab::Minutely);
-        assert_eq!(tabs[5], Tab::Stats);
-        assert_eq!(tabs[6], Tab::Agents);
+        assert_eq!(tabs[1], Tab::Usage);
+        assert_eq!(tabs[2], Tab::Models);
+        assert_eq!(tabs[3], Tab::Daily);
+        assert_eq!(tabs[4], Tab::Hourly);
+        assert_eq!(tabs[5], Tab::Minutely);
+        assert_eq!(tabs[6], Tab::Stats);
+        assert_eq!(tabs[7], Tab::Agents);
     }
 
     #[test]
     fn test_tab_next() {
-        assert_eq!(Tab::Overview.next(), Tab::Models);
+        assert_eq!(Tab::Overview.next(), Tab::Usage);
+        assert_eq!(Tab::Usage.next(), Tab::Models);
         assert_eq!(Tab::Models.next(), Tab::Daily);
         assert_eq!(Tab::Daily.next(), Tab::Hourly);
         assert_eq!(Tab::Hourly.next(), Tab::Minutely);
@@ -1457,7 +1535,8 @@ mod tests {
     #[test]
     fn test_tab_prev() {
         assert_eq!(Tab::Overview.prev(), Tab::Agents);
-        assert_eq!(Tab::Models.prev(), Tab::Overview);
+        assert_eq!(Tab::Usage.prev(), Tab::Overview);
+        assert_eq!(Tab::Models.prev(), Tab::Usage);
         assert_eq!(Tab::Daily.prev(), Tab::Models);
         assert_eq!(Tab::Hourly.prev(), Tab::Daily);
         assert_eq!(Tab::Minutely.prev(), Tab::Hourly);
@@ -1951,6 +2030,9 @@ mod tests {
         assert_eq!(app.current_tab, Tab::Overview);
 
         app.handle_key_event(key(KeyCode::Tab));
+        assert_eq!(app.current_tab, Tab::Usage);
+
+        app.handle_key_event(key(KeyCode::Tab));
         assert_eq!(app.current_tab, Tab::Models);
 
         app.handle_key_event(key(KeyCode::Tab));
@@ -1988,6 +2070,12 @@ mod tests {
 
         app.handle_key_event(key(KeyCode::BackTab));
         assert_eq!(app.current_tab, Tab::Models);
+
+        app.handle_key_event(key(KeyCode::BackTab));
+        assert_eq!(app.current_tab, Tab::Usage);
+
+        app.handle_key_event(key(KeyCode::BackTab));
+        assert_eq!(app.current_tab, Tab::Overview);
     }
 
     #[test]
@@ -2106,10 +2194,13 @@ mod tests {
     fn test_handle_key_left_right_switch() {
         let mut app = make_app();
         app.handle_key_event(key(KeyCode::Right));
+        assert_eq!(app.current_tab, Tab::Usage);
+
+        app.handle_key_event(key(KeyCode::Right));
         assert_eq!(app.current_tab, Tab::Models);
 
         app.handle_key_event(key(KeyCode::Left));
-        assert_eq!(app.current_tab, Tab::Overview);
+        assert_eq!(app.current_tab, Tab::Usage);
     }
 
     #[test]

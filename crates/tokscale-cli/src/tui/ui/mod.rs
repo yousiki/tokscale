@@ -11,6 +11,7 @@ mod models;
 mod overview;
 pub mod spinner;
 mod stats;
+mod usage;
 pub(crate) mod widgets;
 
 use ratatui::prelude::*;
@@ -51,6 +52,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             Tab::Hourly => hourly::render(frame, app, chunks[1]),
             Tab::Minutely => minutely::render(frame, app, chunks[1]),
             Tab::Stats => stats::render(frame, app, chunks[1]),
+            Tab::Usage => usage::render(frame, app, chunks[1]),
         }
     }
 
