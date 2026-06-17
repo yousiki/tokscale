@@ -217,13 +217,13 @@ pub fn parse_jcode_file(path: &Path) -> Vec<UnifiedMessage> {
     );
 
     let journal_path = jcode_journal_path(path);
-    if let Ok(file) = std::fs::File::open(journal_path) {
+    if let Ok(file) = std::fs::File::open(&journal_path) {
         use std::io::{BufRead, BufReader};
-        for (line_index, line) in BufReader::new(file)
-            .lines()
-            .map_while(Result::ok)
-            .enumerate()
-        {
+        let journal_fallback_timestamp = file_modified_timestamp_ms(&journal_path);
+        for (line_index, line) in BufReader::new(file).lines().enumerate() {
+            let Ok(line) = line else {
+                continue;
+            };
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 continue;
@@ -237,7 +237,7 @@ pub fn parse_jcode_file(path: &Path) -> Vec<UnifiedMessage> {
             parsed.extend(parse_jcode_messages(
                 entry.append_messages,
                 &mut context,
-                fallback_timestamp,
+                journal_fallback_timestamp,
                 &format!("journal:{line_index}"),
             ));
         }
@@ -347,5 +347,91 @@ mod tests {
             messages[1].workspace_label.as_deref(),
             Some("journal-project")
         );
+    }
+
+    #[test]
+    fn uses_journal_mtime_for_journal_messages_without_timestamps() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let snapshot = dir.path().join("session_test.json");
+        let journal = dir.path().join("session_test.journal.jsonl");
+        std::fs::write(
+            &snapshot,
+            r#"{
+  "id":"session_test",
+  "model":"snapshot-model",
+  "messages":[
+    {"id":"assistant_snapshot","role":"assistant","token_usage":{"input_tokens":100,"output_tokens":10}}
+  ]
+}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &journal,
+            r#"{"append_messages":[{"id":"assistant_journal","role":"assistant","token_usage":{"input_tokens":200,"output_tokens":20}}]}
+"#,
+        )
+        .unwrap();
+
+        let snapshot_time =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let journal_time =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_086_400);
+        let snapshot_file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&snapshot)
+            .unwrap();
+        let Ok(()) = snapshot_file.set_modified(snapshot_time) else {
+            return;
+        };
+        drop(snapshot_file);
+        let journal_file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&journal)
+            .unwrap();
+        let Ok(()) = journal_file.set_modified(journal_time) else {
+            return;
+        };
+        drop(journal_file);
+
+        let snapshot_fallback = file_modified_timestamp_ms(&snapshot);
+        let journal_fallback = file_modified_timestamp_ms(&journal);
+        assert_ne!(snapshot_fallback, journal_fallback);
+
+        let messages = parse_jcode_file(&snapshot);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].timestamp, snapshot_fallback);
+        assert_eq!(messages[1].timestamp, journal_fallback);
+    }
+
+    #[test]
+    fn skips_unreadable_journal_lines_and_continues_parsing() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let snapshot = dir.path().join("session_test.json");
+        std::fs::write(
+            &snapshot,
+            r#"{
+  "id":"session_test",
+  "model":"snapshot-model",
+  "messages":[]
+}"#,
+        )
+        .unwrap();
+
+        let mut journal = Vec::new();
+        journal.extend_from_slice(
+            br#"{"append_messages":[{"id":"assistant_before","role":"assistant","timestamp":"2026-06-16T12:00:01Z","token_usage":{"input_tokens":100,"output_tokens":10}}]}
+"#,
+        );
+        journal.extend_from_slice(b"\xff\n");
+        journal.extend_from_slice(
+            br#"{"append_messages":[{"id":"assistant_after","role":"assistant","timestamp":"2026-06-16T12:00:02Z","token_usage":{"input_tokens":200,"output_tokens":20}}]}
+"#,
+        );
+        std::fs::write(dir.path().join("session_test.journal.jsonl"), journal).unwrap();
+
+        let messages = parse_jcode_file(&snapshot);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].tokens.input, 100);
+        assert_eq!(messages[1].tokens.input, 200);
     }
 }
