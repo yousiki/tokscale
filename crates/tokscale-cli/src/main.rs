@@ -901,6 +901,7 @@ pub enum ClientFilter {
     Zcode,
     Opencodereview,
     Codebuddy,
+    Workbuddy,
     Synthetic,
 }
 
@@ -946,6 +947,7 @@ impl ClientFilter {
             Self::Zcode => "zcode",
             Self::Opencodereview => "opencodereview",
             Self::Codebuddy => "codebuddy",
+            Self::Workbuddy => "workbuddy",
             Self::Synthetic => "synthetic",
         }
     }
@@ -994,6 +996,7 @@ impl ClientFilter {
             Self::Zcode => Some(ClientId::Zcode),
             Self::Opencodereview => Some(ClientId::OpenCodeReview),
             Self::Codebuddy => Some(ClientId::CodeBuddy),
+            Self::Workbuddy => Some(ClientId::WorkBuddy),
             Self::Synthetic => None,
         }
     }
@@ -1039,6 +1042,7 @@ impl ClientFilter {
             ClientId::Zcode => Self::Zcode,
             ClientId::OpenCodeReview => Self::Opencodereview,
             ClientId::CodeBuddy => Self::Codebuddy,
+            ClientId::WorkBuddy => Self::Workbuddy,
         }
     }
 
@@ -3520,6 +3524,7 @@ fn capitalize_client(client: &str) -> String {
         "junie" => "Junie".to_string(),
         "zcode" => "ZCode".to_string(),
         "codebuddy" => "CodeBuddy".to_string(),
+        "workbuddy" => "WorkBuddy".to_string(),
         other => other.to_string(),
     }
 }

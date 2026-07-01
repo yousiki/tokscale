@@ -36,6 +36,7 @@ export const SUPPORTED_CLIENT_TYPES = [
   "zcode",
   "opencodereview",
   "codebuddy",
+  "workbuddy",
 ] as const;
 
 export type CcMirrorClientType = `cc-mirror/${string}`;

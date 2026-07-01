@@ -64,6 +64,7 @@ export const SOURCE_DISPLAY_NAMES: Record<ClientType, string> = {
   zcode: "ZCode",
   opencodereview: "OpenCodeReview",
   codebuddy: "CodeBuddy",
+  workbuddy: "WorkBuddy",
 };
 
 // Client logos from GitHub CDN (public repo)
@@ -107,6 +108,7 @@ export const SOURCE_LOGOS: Record<ClientType, string> = {
   zcode: "https://github.com/zai-org.png",
   opencodereview: "https://github.com/alibaba.png",
   codebuddy: "https://github.com/Tencent.png",
+  workbuddy: "https://github.com/Tencent.png",
 };
 
 export const SOURCE_COLORS: Record<ClientType, string> = {
@@ -147,6 +149,7 @@ export const SOURCE_COLORS: Record<ClientType, string> = {
   zcode: "#3B5BDB",
   opencodereview: "#FF6A00",
   codebuddy: "#00A4FF",
+  workbuddy: "#2563EB",
 };
 
 export const SOURCE_TEXT_COLORS: Partial<Record<ClientType, string>> = {
