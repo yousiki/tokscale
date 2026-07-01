@@ -29,6 +29,7 @@ pub struct ReportOptions {
     pub today: bool,
     pub week: bool,
     pub month: bool,
+    pub full: bool,
 }
 
 pub fn run_report(opts: ReportOptions) -> Result<()> {
@@ -87,14 +88,14 @@ pub fn run_report(opts: ReportOptions) -> Result<()> {
             println!("{}", json);
         } else {
             let is_multi_day = opts.week || opts.month || (opts.since.is_some() && !opts.today);
-            print_report_table(&entries, &db, is_multi_day)?;
+            print_report_table(&entries, &db, is_multi_day, opts.full)?;
         }
     } else if opts.json {
         let json = serde_json::to_string_pretty(&entries)?;
         println!("{}", json);
     } else {
         let is_multi_day = opts.week || opts.month || (opts.since.is_some() && !opts.today);
-        print_report_table(&entries, &db, is_multi_day)?;
+        print_report_table(&entries, &db, is_multi_day, opts.full)?;
     }
 
     Ok(())
@@ -387,7 +388,7 @@ fn run_task_grouping(db: &WikiDb, entries: &[WikiEntry], backend: &str) -> Resul
         }
         "codex" => {
             let mut c = Command::new("codex");
-            c.args(["--quiet", "--approval-mode", "never"])
+            c.args(["exec"])
                 .arg(format!("{}\n\n{}", GROUPING_SYSTEM_PROMPT, prompt));
             c
         }
@@ -398,8 +399,8 @@ fn run_task_grouping(db: &WikiDb, entries: &[WikiEntry], backend: &str) -> Resul
             c
         }
         "kiro" => {
-            let mut c = Command::new("kiro");
-            c.args(["--non-interactive", "--prompt"])
+            let mut c = Command::new("kiro-cli");
+            c.args(["chat", "--no-interactive"])
                 .arg(format!("{}\n\n{}", GROUPING_SYSTEM_PROMPT, prompt));
             c
         }
@@ -827,7 +828,7 @@ fn run_cli_summarizer(
         }
         "codex" => {
             let mut c = Command::new("codex");
-            c.args(["--quiet", "--approval-mode", "never"])
+            c.args(["exec"])
                 .arg(format!("{}\n\n{}", SUMMARIZER_SYSTEM_PROMPT, prompt));
             c
         }
@@ -838,8 +839,8 @@ fn run_cli_summarizer(
             c
         }
         "kiro" => {
-            let mut c = Command::new("kiro");
-            c.args(["--non-interactive", "--prompt"])
+            let mut c = Command::new("kiro-cli");
+            c.args(["chat", "--no-interactive"])
                 .arg(format!("{}\n\n{}", SUMMARIZER_SYSTEM_PROMPT, prompt));
             c
         }
@@ -984,7 +985,12 @@ fn extract_json_array(text: &str) -> &str {
     text
 }
 
-fn print_report_table(entries: &[WikiEntry], _db: &WikiDb, is_multi_day: bool) -> Result<()> {
+fn print_report_table(
+    entries: &[WikiEntry],
+    _db: &WikiDb,
+    is_multi_day: bool,
+    full: bool,
+) -> Result<()> {
     if entries.is_empty() {
         println!("No sessions found for the given filters.");
         return Ok(());
@@ -1116,15 +1122,15 @@ fn print_report_table(entries: &[WikiEntry], _db: &WikiDb, is_multi_day: bool) -
     println!();
 
     if is_multi_day {
-        print_daily_breakdown(entries);
+        print_daily_breakdown(entries, full);
     } else {
-        print_session_list(entries);
+        print_session_list(entries, full);
     }
 
     Ok(())
 }
 
-fn print_daily_breakdown(entries: &[WikiEntry]) {
+fn print_daily_breakdown(entries: &[WikiEntry], full: bool) {
     use std::collections::BTreeMap;
 
     let mut by_date: BTreeMap<String, (f64, i64, usize, Vec<&WikiEntry>)> = BTreeMap::new();
@@ -1155,7 +1161,8 @@ fn print_daily_breakdown(entries: &[WikiEntry]) {
             format_tokens(*tokens),
             format!("${:.2}", cost),
         );
-        for s in sessions.iter().take(5) {
+        let daily_limit = if full { sessions.len() } else { 5 };
+        for s in sessions.iter().take(daily_limit) {
             let title = s.title.as_deref().unwrap_or("(pending)");
             let model = s.models_used.first().map(|m| m.as_str()).unwrap_or("-");
             let display_title: String = if title.chars().count() > 40 {
@@ -1177,8 +1184,9 @@ fn print_daily_breakdown(entries: &[WikiEntry]) {
     println!();
 }
 
-fn print_session_list(entries: &[WikiEntry]) {
-    let recent: Vec<&WikiEntry> = entries.iter().take(10).collect();
+fn print_session_list(entries: &[WikiEntry], full: bool) {
+    let list_limit = if full { entries.len() } else { 10 };
+    let recent: Vec<&WikiEntry> = entries.iter().take(list_limit).collect();
     if !recent.is_empty() {
         println!("  Sessions:");
         println!("  {}", "─".repeat(80));
@@ -1201,7 +1209,7 @@ fn print_session_list(entries: &[WikiEntry]) {
                 title,
             );
         }
-        if entries.len() > 10 {
+        if !full && entries.len() > 10 {
             println!("    … +{} more sessions", entries.len() - 10);
         }
         println!();
@@ -2053,6 +2061,7 @@ mod tests {
             today: false,
             week: false,
             month: false,
+            full: false,
         };
         let index = build_session_path_index(&opts);
 
