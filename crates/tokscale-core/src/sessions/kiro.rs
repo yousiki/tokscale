@@ -520,6 +520,14 @@ fn parse_kiro_global_storage_file(path: &Path) -> Vec<UnifiedMessage> {
         return messages;
     }
 
+    if value.get("executions").is_some() && value.get("version").is_some() {
+        return Vec::new();
+    }
+
+    if let Some(messages) = try_parse_kiro_workspace_session(&value, path, fallback_timestamp) {
+        return messages;
+    }
+
     let file_stem = path
         .file_stem()
         .and_then(|name| name.to_str())
@@ -653,7 +661,37 @@ fn try_parse_kiro_execution_file(value: &Value, path: &Path) -> Option<Vec<Unifi
                 })
                 .sum::<usize>()
         })
-        .unwrap_or(0);
+        .unwrap_or(0)
+        + obj
+            .get("input")
+            .and_then(|inp| inp.get("data"))
+            .and_then(|data| data.get("messages"))
+            .and_then(|msgs| msgs.as_array())
+            .map(|msgs| {
+                msgs.iter()
+                    .map(|msg| {
+                        if let Some(content) = msg.get("content").and_then(|c| c.as_array()) {
+                            content
+                                .iter()
+                                .filter_map(|part| {
+                                    if part.get("type").and_then(|t| t.as_str()) == Some("text") {
+                                        part.get("text")
+                                            .and_then(|t| t.as_str())
+                                            .map(|s| s.chars().count())
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .sum::<usize>()
+                        } else if let Some(text) = msg.get("content").and_then(|c| c.as_str()) {
+                            text.chars().count()
+                        } else {
+                            0
+                        }
+                    })
+                    .sum::<usize>()
+            })
+            .unwrap_or(0);
 
     let input = estimate_tokens(input_chars);
     let output = estimate_tokens(output_chars);
@@ -695,6 +733,94 @@ fn try_parse_kiro_execution_file(value: &Value, path: &Path) -> Option<Vec<Unifi
     Some(vec![message])
 }
 
+fn try_parse_kiro_workspace_session(
+    value: &Value,
+    path: &Path,
+    fallback_timestamp: i64,
+) -> Option<Vec<UnifiedMessage>> {
+    let history = value.get("history")?.as_array()?;
+    if value.get("sessionId").is_none() && value.get("selectedModel").is_none() {
+        return None;
+    }
+
+    let file_stem = path
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or("unknown");
+    let workspace = kiro_global_storage_workspace(path);
+    let workspace_key = workspace.as_deref().and_then(normalize_workspace_key);
+    let workspace_label = workspace_key.as_deref().and_then(workspace_label_from_key);
+    let session_id = value
+        .get("sessionId")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| match workspace.as_deref() {
+            Some(ws) => format!("{}/{}", ws, file_stem),
+            None => file_stem.to_string(),
+        });
+
+    let model_id = value
+        .get("selectedModel")
+        .and_then(|v| v.as_str())
+        .filter(|m| !m.is_empty())
+        .unwrap_or("auto")
+        .to_string();
+
+    let mut total_prompt_chars: usize = 0;
+    let mut prompt_log_count: i32 = 0;
+    let mut assistant_chars: usize = 0;
+
+    for entry in history {
+        if let Some(prompt_logs) = entry.get("promptLogs").and_then(|v| v.as_array()) {
+            for pl in prompt_logs {
+                if let Some(prompt) = pl.get("prompt").and_then(|v| v.as_str()) {
+                    total_prompt_chars += prompt.chars().count();
+                    prompt_log_count += 1;
+                }
+            }
+        }
+        if let Some(msg) = entry.get("message") {
+            if msg.get("role").and_then(|v| v.as_str()) == Some("assistant") {
+                if let Some(content) = msg.get("content").and_then(|v| v.as_str()) {
+                    assistant_chars += content.chars().count();
+                }
+            }
+        }
+    }
+
+    if total_prompt_chars == 0 {
+        return None;
+    }
+
+    let input = estimate_tokens(total_prompt_chars);
+    let output = estimate_tokens(assistant_chars);
+
+    if input + output == 0 {
+        return Some(Vec::new());
+    }
+
+    let mut message = UnifiedMessage::new_with_dedup(
+        CLIENT_ID,
+        model_id,
+        PROVIDER_ID,
+        session_id.clone(),
+        fallback_timestamp,
+        TokenBreakdown {
+            input,
+            output,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: 0,
+        },
+        0.0,
+        Some(format!("{}:workspace-session", session_id)),
+    );
+    message.message_count = prompt_log_count.max(1);
+    message.is_turn_start = true;
+    message.set_workspace(workspace_key, workspace_label);
+    Some(vec![message])
+}
+
 /// Drop globalStorage snapshot messages whose execution is already counted.
 ///
 /// Kiro IDE's globalStorage (verified against real trees) holds, per workspace
@@ -707,14 +833,19 @@ fn try_parse_kiro_execution_file(value: &Value, path: &Path) -> Option<Vec<Unifi
 ///
 /// Matching is exact and workspace-scoped on the shared `executionId` (with a
 /// legacy fallback matching an execution's `chatSessionId` against a snapshot
-/// file stem). Anything unmatched is kept — the pass can only remove verified
-/// duplicates, never unrelated usage.
+/// file stem). Workspace-session promptLogs snapshots are matched globally on
+/// the session UUID instead, because they live under a different
+/// `kiro.kiroagent` subdirectory than executions and so never share a
+/// workspace key. Anything unmatched is kept — the pass can only remove
+/// verified duplicates, never unrelated usage.
 pub(crate) fn suppress_snapshots_covered_by_executions(
     messages: Vec<UnifiedMessage>,
 ) -> Vec<UnifiedMessage> {
     let mut executed_sessions: std::collections::HashSet<(Option<String>, String)> =
         std::collections::HashSet::new();
     let mut executed_ids: std::collections::HashSet<(Option<String>, String)> =
+        std::collections::HashSet::new();
+    let mut executed_session_ids: std::collections::HashSet<String> =
         std::collections::HashSet::new();
     for message in &messages {
         let Some(execution_id) = message
@@ -726,6 +857,7 @@ pub(crate) fn suppress_snapshots_covered_by_executions(
         };
         executed_sessions.insert((message.workspace_key.clone(), message.session_id.clone()));
         executed_ids.insert((message.workspace_key.clone(), execution_id.to_string()));
+        executed_session_ids.insert(message.session_id.clone());
     }
     if executed_ids.is_empty() {
         return messages;
@@ -741,6 +873,16 @@ pub(crate) fn suppress_snapshots_covered_by_executions(
             if let Some((_, execution_id)) = key.split_once(":globalstorage:exec:") {
                 return !executed_ids
                     .contains(&(message.workspace_key.clone(), execution_id.to_string()));
+            }
+            // Workspace-session promptLogs snapshots duplicate the cumulative
+            // request payloads already captured by that session's execution
+            // records. They live under `kiro.kiroagent/workspace-sessions/`
+            // while executions live under `kiro.kiroagent/<workspace-hash>/`,
+            // so their workspace keys can never agree — match globally on the
+            // session UUID (execution `chatSessionId` == workspace-session
+            // `sessionId`). Sessions with no counted execution are kept.
+            if key.ends_with(":workspace-session") {
+                return !executed_session_ids.contains(&message.session_id);
             }
             if !key.ends_with(":globalstorage") {
                 return true;
@@ -1201,6 +1343,81 @@ not valid json at all
         assert!(keys.contains(&"workspace-a/other-session:globalstorage"));
         assert!(keys.contains(&"workspace-b/chat-abc:globalstorage"));
         assert!(!keys.contains(&"workspace-a/chat-abc:globalstorage"));
+    }
+
+    #[test]
+    fn test_parse_kiro_workspace_session_promptlogs() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join(
+            "Library/Application Support/Kiro/User/globalStorage/kiro.kiroagent/workspace-sessions/d29ya3NwYWNl/sess-uuid-1.json",
+        );
+        fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+        fs::write(
+            &file_path,
+            r#"{
+                "sessionId": "sess-uuid-1",
+                "selectedModel": "claude-sonnet-4",
+                "history": [
+                    {
+                        "message": {"role": "user", "content": "hello"},
+                        "promptLogs": [{"prompt": "0123456789012345", "completion": "hi"}]
+                    },
+                    {
+                        "message": {"role": "assistant", "content": "On it."},
+                        "promptLogs": [{"prompt": "01234567890123456789012345678901", "completion": "done"}]
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let messages = parse_kiro_file(&file_path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].session_id, "sess-uuid-1");
+        assert_eq!(messages[0].model_id, "claude-sonnet-4");
+        // 16 + 32 prompt chars -> ceil(48 / 4) = 12 estimated input tokens.
+        assert_eq!(messages[0].tokens.input, 12);
+        // "On it." -> ceil(6 / 4) = 2 estimated output tokens.
+        assert_eq!(messages[0].tokens.output, 2);
+        assert_eq!(messages[0].message_count, 2);
+        assert_eq!(
+            messages[0].dedup_key,
+            Some("sess-uuid-1:workspace-session".to_string())
+        );
+    }
+
+    #[test]
+    fn suppress_drops_workspace_session_covered_by_execution() {
+        let messages = vec![
+            // Workspace-session promptLogs snapshot for sess-1: covered by the
+            // execution below even though the workspace keys differ (the two
+            // stores live under different kiro.kiroagent subdirectories).
+            make_globalstorage_message(
+                "sess-1",
+                "sess-1:workspace-session",
+                Some("workspace-sessions"),
+            ),
+            // Execution whose chatSessionId is the same session UUID.
+            make_globalstorage_message("sess-1", "execution:exec-9", Some("abc080c47e826767")),
+            // Workspace-session for a session with no counted execution: kept.
+            make_globalstorage_message(
+                "sess-2",
+                "sess-2:workspace-session",
+                Some("workspace-sessions"),
+            ),
+        ];
+
+        let kept = suppress_snapshots_covered_by_executions(messages);
+
+        let keys: Vec<&str> = kept
+            .iter()
+            .filter_map(|message| message.dedup_key.as_deref())
+            .collect();
+        assert_eq!(kept.len(), 2);
+        assert!(keys.contains(&"execution:exec-9"));
+        assert!(keys.contains(&"sess-2:workspace-session"));
+        assert!(!keys.contains(&"sess-1:workspace-session"));
     }
 
     #[test]
